@@ -17,11 +17,18 @@
 
 ## Table of Contents
 
-- [Install](#install)
-- [Usage](#usage)
-- [API](#api)
-- [Contribute](#contribute)
-- [License](#license)
+- [datastore-pubsub](#datastore-pubsub)
+  - [Lead Maintainer](#lead-maintainer)
+  - [Table of Contents](#table-of-contents)
+    - [Install](#install)
+  - [Usage](#usage)
+  - [API](#api)
+      - [Setup](#setup)
+      - [Get](#get)
+      - [Put](#put)
+      - [Unsubscribe](#unsubscribe)
+  - [Contribute](#contribute)
+  - [License](#license)
 
 ### Install
 
@@ -52,6 +59,11 @@ Arguments:
 - `peerId` (`PeerId` [Instance](https://github.com/libp2p/js-peer-id)): peer identifier object.
 - `validator` (Object): containing validate function and select function.
 - `subscriptionKeyFn` (function): function to manipulate the key topic received according to the needs, as well as to block the message received to be published.
+- `keyEncoders` (Object) - optional object to aid in encoding and decoding keys, with the following properties
+- `keyEncoders.keyToTopic` (function) - convert a key to a topic
+- `keyEncoders.topicToKey` (function) - convert a topic to a key
+- `keyEncoders.keyToStoreKey` (function) - convert a key to a datastore key
+
 
 Note: `validator` object must be composed by two functions, `validate (data, key, callback)` and `select (receivedRecord, currentRecord, callback)`. `validate` aims to verify if a new record received by pubsub is valid to be stored locally by the node. If it is valid and the node already has a local record stored, `select` is the function provided to be responsible for deciding which record is the best (newer) between the already stored and the received through pubsub. A `validator` example can be found at: TODO (js-ipns)
 
