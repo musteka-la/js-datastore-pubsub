@@ -15,7 +15,7 @@ const { Key } = require('interface-datastore')
 const { Record } = require('libp2p-record')
 
 const DatastorePubsub = require('../src')
-const { keyToTopic } = require('../src/utils')
+const { keyToTopic, encodeBase32 } = require('../src/utils')
 const { connect, waitFor, waitForPeerToSubscribe, spawnDaemon, stopDaemon } = require('./utils')
 
 // Always returning the expected values
@@ -532,6 +532,72 @@ describe('datastore-pubsub', function () {
         expect(err).to.exist() // not locally stored record
         expect(pubsubA.subscribe.calledOnce).to.equal(true)
 
+        done()
+      })
+    })
+  })
+
+  it('should convert key to topic using custom encoder', function (done) {
+    const cKey = (new Key(`/hello`)).toBuffer()
+    const encoders = {
+      keyToTopic: () => {
+        return '/hello'
+      }
+    }
+
+    const dsPubsubA = new DatastorePubsub(pubsubA, datastoreA, peerIdA, smoothValidator, null, encoders)
+    const stub = sinon.stub(dsPubsubA._datastore, 'get').callsArgWith(1, null, Buffer.from('world!'))
+
+    dsPubsubA.put(cKey, Buffer.from('world!'), (err) => {
+      expect(err).to.not.exist()
+      dsPubsubA.get(cKey, (err, val) => {
+        expect(err).to.not.exist()
+        expect(val.toString()).to.eq('world!')
+
+        stub.restore()
+        done()
+      })
+    })
+  })
+
+  it('should convert topic to key using custom encoder', function (done) {
+    const cKey = (new Key(`/hello`)).toBuffer()
+    const encoders = {
+      topicToKey: () => {
+        return cKey
+      }
+    }
+
+    const dsPubsubA = new DatastorePubsub(pubsubA, datastoreA, peerIdA, smoothValidator, null, encoders)
+    const stub = sinon.stub(dsPubsubA._datastore, 'get').callsArgWith(1, null, Buffer.from('world!'))
+
+    dsPubsubA.put(cKey, Buffer.from('world!'), (err) => {
+      expect(err).to.not.exist()
+      dsPubsubA.get(cKey, (err, val) => {
+        expect(err).to.not.exist()
+        expect(val.toString()).to.eq('world!')
+
+        stub.restore()
+        done()
+      })
+    })
+  })
+
+  it('should convert datastore key using custom encoder', function (done) {
+    const cKey = (new Key(`/hello`)).toBuffer()
+    const newKey = new Key('/mystore/' + encodeBase32(key), false)
+    const encoders = {
+      keyToStoreKey: () => {
+        return newKey
+      }
+    }
+
+    const dsPubsubA = new DatastorePubsub(pubsubA, datastoreA, peerIdA, smoothValidator, null, encoders)
+    dsPubsubA.put(cKey, Buffer.from('world!'), (err) => {
+      expect(err).to.not.exist()
+      datastoreA.get(newKey, (err, val) => {
+        expect(err).to.not.exist()
+        expect(val.toString()).to.eq('world!')
         done()
       })
     })

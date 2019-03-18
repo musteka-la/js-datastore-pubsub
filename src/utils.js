@@ -3,12 +3,16 @@
 const multibase = require('multibase')
 const errcode = require('err-code')
 
+const { Key } = require('interface-datastore')
+
 const namespace = '/record/'
 const base64urlCode = 'u' // base64url code from multibase
 
-module.exports.encodeBase32 = (buf) => {
+const encodeBase32 = (buf) => {
   return multibase.encode('base32', buf).slice(1) // slice off multibase codec
 }
+
+module.exports.encodeBase32 = encodeBase32
 
 // converts a binary record key to a pubsub topic key.
 module.exports.keyToTopic = (key) => {
@@ -28,4 +32,8 @@ module.exports.topicToKey = (topic) => {
   const key = `${base64urlCode}${topic.substring(namespace.length)}`
 
   return multibase.decode(key).toString()
+}
+
+module.exports.keyToStoreKey = (key) => {
+  return new Key('/' + encodeBase32(key), false)
 }

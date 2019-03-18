@@ -1,7 +1,7 @@
 'use strict'
 
 const { Key } = require('interface-datastore')
-const { encodeBase32, keyToTopic, topicToKey } = require('./utils')
+const { keyToTopic, topicToKey, keyToStoreKey } = require('./utils')
 
 const errcode = require('err-code')
 const assert = require('assert')
@@ -18,22 +18,33 @@ class DatastorePubsub {
    * @param {*} datastore - datastore instance.
    * @param {*} peerId - peer-id instance.
    * @param {Object} validator - validator functions.
-   * @param {function(record, peerId, callback)} validator.validate - function to validate a record.
-   * @param {function(received, current, callback)} validator.select - function to select the newest between two records.
+   * @param {function(entry, peerId, callback)} validator.validate - function to validate a entry.
+   * @param {function(received, current, callback)} validator.select - function to select the newest between two entries.
    * @param {function(key, callback)} subscriptionKeyFn - optional function to manipulate the key topic received before processing it.
+   * @param {Object} keyEncoders - optional object to aid in encoding and decoding keys, with the following properties
+   * @params {function(key)} keyEncoders.keyToTopic - convert a key to a topic
+   * @params {function(topic)} keyEncoders.topicToKey - convert a topic to a key
+   * @params {function(key)} keyEncoders.keyToStoreKey - convert a key to a datastore key
    * @memberof DatastorePubsub
    */
-  constructor (pubsub, datastore, peerId, validator, subscriptionKeyFn) {
+  constructor (pubsub, datastore, peerId, validator, subscriptionKeyFn, keyEncoders = {}) {
     assert.strictEqual(typeof validator, 'object', 'missing validator')
     assert.strictEqual(typeof validator.validate, 'function', 'missing validate function')
     assert.strictEqual(typeof validator.select, 'function', 'missing select function')
     subscriptionKeyFn && assert.strictEqual(typeof subscriptionKeyFn, 'function', 'invalid subscriptionKeyFn received')
+    keyEncoders.keyToTopic && assert.strictEqual(typeof keyEncoders.keyToTopic, 'function', 'invalid keyEncoders.keyToTopic received')
+    keyEncoders.topicToKey && assert.strictEqual(typeof keyEncoders.topicToKey, 'function', 'invalid topicToKey received')
+    keyEncoders.keyToStoreKey && assert.strictEqual(typeof keyEncoders.keyToStoreKey, 'function', 'invalid keyToStoreKey received')
 
     this._pubsub = pubsub
     this._datastore = datastore
     this._peerId = peerId
     this._validator = validator
     this._handleSubscriptionKeyFn = subscriptionKeyFn
+
+    this._keyToTopicFn = keyEncoders.keyToTopic || keyToTopic
+    this._topicToKeyFn = keyEncoders.topicToKey || topicToKey
+    this._keyToStoreKeyFn = keyEncoders.keyToStoreKey || keyToStoreKey
 
     // Bind _onMessage function, which is called by pubsub.
     this._onMessage = this._onMessage.bind(this)
@@ -61,12 +72,19 @@ class DatastorePubsub {
       return callback(errcode(new Error(errMsg), 'ERR_INVALID_VALUE_RECEIVED'))
     }
 
-    const stringifiedTopic = keyToTopic(key)
+    const stringifiedTopic = this._keyToTopicFn(key)
 
     log(`publish value for topic ${stringifiedTopic}`)
 
-    // Publish record to pubsub
-    this._pubsub.publish(stringifiedTopic, val, callback)
+    // need to subscribe to the topic to store on the local store
+    this._subscribe(stringifiedTopic, (err) => {
+      if (err) {
+        return callback(err)
+      }
+
+      // Publish entry to pubsub
+      this._pubsub.publish(stringifiedTopic, val, callback)
+    })
   }
 
   /**
@@ -83,8 +101,27 @@ class DatastorePubsub {
       return callback(errcode(new Error(errMsg), 'ERR_INVALID_DATASTORE_KEY'))
     }
 
-    const stringifiedTopic = keyToTopic(key)
+    const stringifiedTopic = this._keyToTopicFn(key)
+    this.isSubscribed(stringifiedTopic, (err, subscribed) => {
+      if (err) {
+        return callback(err)
+      }
 
+      if (subscribed) {
+        return this._getLocal(key, callback)
+      }
+
+      this._subscribe(stringifiedTopic, (err) => {
+        if (err) {
+          return callback(err)
+        }
+
+        this._getLocal(key, callback)
+      })
+    })
+  }
+
+  isSubscribed (stringifiedTopic, callback) {
     this._pubsub.ls((err, res) => {
       if (err) {
         return callback(err)
@@ -92,21 +129,25 @@ class DatastorePubsub {
 
       // If already subscribed, just try to get it
       if (res && Array.isArray(res) && res.indexOf(stringifiedTopic) > -1) {
-        return this._getLocal(key, callback)
+        return callback(null, true)
       }
 
-      // Subscribe
-      this._pubsub.subscribe(stringifiedTopic, this._onMessage, (err) => {
-        if (err) {
-          const errMsg = `cannot subscribe topic ${stringifiedTopic}`
+      callback(null, false)
+    })
+  }
 
-          log.error(errMsg)
-          return callback(errcode(new Error(errMsg), 'ERR_SUBSCRIBING_TOPIC'))
-        }
-        log(`subscribed values for key ${stringifiedTopic}`)
+  _subscribe (stringifiedTopic, callback) {
+    // Subscribe
+    this._pubsub.subscribe(stringifiedTopic, this._onMessage, (err) => {
+      if (err) {
+        const errMsg = `cannot subscribe topic ${stringifiedTopic}`
 
-        this._getLocal(key, callback)
-      })
+        log.error(errMsg)
+        return callback(errcode(new Error(errMsg), 'ERR_SUBSCRIBING_TOPIC'))
+      }
+      log(`subscribed values for key ${stringifiedTopic}`)
+
+      callback()
     })
   }
 
@@ -116,32 +157,31 @@ class DatastorePubsub {
    * @returns {void}
    */
   unsubscribe (key) {
-    const stringifiedTopic = keyToTopic(key)
+    const stringifiedTopic = this._keyToTopicFn(key)
 
     this._pubsub.unsubscribe(stringifiedTopic, this._onMessage)
   }
 
-  // Get record from local datastore
+  // Get entry from local datastore
   _getLocal (key, callback) {
-    // encode key - base32(/ipns/{cid})
-    const routingKey = new Key('/' + encodeBase32(key), false)
+    const storeKey = this._keyToStoreKeyFn(key)
 
-    this._datastore.get(routingKey, (err, dsVal) => {
+    this._datastore.get(storeKey, (err, dsVal) => {
       if (err) {
         if (err.code !== 'ERR_NOT_FOUND') {
-          const errMsg = `unexpected error getting the ipns record for ${routingKey.toString()}`
+          const errMsg = `unexpected error getting the record for ${storeKey.toString()}`
 
           log.error(errMsg)
           return callback(errcode(new Error(errMsg), 'ERR_UNEXPECTED_ERROR_GETTING_RECORD'))
         }
-        const errMsg = `local record requested was not found for ${routingKey.toString()}`
+        const errMsg = `local entry requested was not found for ${storeKey.toString()}`
 
         log.error(errMsg)
         return callback(errcode(new Error(errMsg), 'ERR_NOT_FOUND'))
       }
 
       if (!Buffer.isBuffer(dsVal)) {
-        const errMsg = `found record that we couldn't convert to a value`
+        const errMsg = `found entry that we couldn't convert to a value`
 
         log.error(errMsg)
         return callback(errcode(new Error(errMsg), 'ERR_INVALID_RECORD_RECEIVED'))
@@ -153,22 +193,16 @@ class DatastorePubsub {
 
   // handles pubsub subscription messages
   _onMessage (msg) {
-    const { data, from, topicIDs } = msg
+    const { data, topicIDs } = msg
     let key
     try {
-      key = topicToKey(topicIDs[0])
+      key = this._topicToKeyFn(topicIDs[0])
     } catch (err) {
       log.error(err)
       return
     }
 
     log(`message received for ${key} topic`)
-
-    // Stop if the message is from the peer (it already stored it while publishing to pubsub)
-    if (from === this._peerId.toB58String()) {
-      log(`message discarded as it is from the same peer`)
-      return
-    }
 
     if (this._handleSubscriptionKeyFn) {
       this._handleSubscriptionKeyFn(key, (err, res) => {
@@ -245,10 +279,9 @@ class DatastorePubsub {
 
   // add record to datastore
   _storeRecord (key, data) {
-    // encode key - base32(/ipns/{cid})
-    const routingKey = new Key('/' + encodeBase32(key), false)
+    const storeKey = this._keyToStoreKeyFn(key)
 
-    this._datastore.put(routingKey, data, (err) => {
+    this._datastore.put(storeKey, data, (err) => {
       if (err) {
         log.error(`record for ${key.toString()} could not be stored in the routing`)
         return
